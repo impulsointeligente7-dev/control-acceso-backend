@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Control Acceso - Gemini ListModels")
+app = FastAPI(title="Control Acceso - Gemini 2.5")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 class ImagenRequest(BaseModel):
@@ -19,35 +19,19 @@ class PlacaResponse(BaseModel):
     confianza: float=0.0
     raw_text: Optional[str]=None
     modelo_usado: Optional[str]=None
-    debug: Optional[str]=None
 
 GEMINI_KEY = os.getenv("GEMINI_API_KEY") or ""
 
 def limpiar_placa(texto: str) -> str:
     if not texto: return ""
     t = texto.upper().replace(" ","").replace("-","")
-    m = re.search(r'F?[A-Z]?[0-9]{1,4}[A-Z]{2,3}|[A-Z]{1,2}[0-9]{3,4}[A-Z]{0,3}', t)
+    m = re.search(r'F?[A-Z]?[0-9]{1,4}[A-Z]{2,3}|[A-Z]{1,2}[0-9]{3,4}[A-Z]{0,3}|A000AAA', t)
     if m: return re.sub(r'[^A-Z0-9]', '', m.group(0))
     return re.sub(r'[^A-Z0-9]', '', t)[:10]
 
 @app.get("/")
 def root():
-    return {"status":"Control Acceso Backend OK - GEMINI LIST","gemini_configurada":bool(GEMINI_KEY),"key_preview":GEMINI_KEY[:15]+"..." if GEMINI_KEY else "NO KEY"}
-
-@app.get("/api/modelos")
-def listar_modelos():
-    if not GEMINI_KEY:
-        raise HTTPException(500, detail="Falta GEMINI_API_KEY")
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_KEY)
-        modelos = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                modelos.append(m.name)
-        return {"modelos_disponibles": modelos, "key_preview": GEMINI_KEY[:15]+"..."}
-    except Exception as e:
-        raise HTTPException(500, detail=f"Error listando modelos: {e}. Habilita Generative Language API en https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com?project=102711703969")
+    return {"status":"Control Acceso Backend OK - GEMINI 2.5","model":"models/gemini-2.5-flash","gemini_configurada":bool(GEMINI_KEY),"key_preview":GEMINI_KEY[:15]+"..." if GEMINI_KEY else "NO KEY"}
 
 @app.post("/api/leer-placa", response_model=PlacaResponse)
 def leer_placa(req: ImagenRequest):
@@ -64,56 +48,34 @@ def leer_placa(req: ImagenRequest):
         import google.generativeai as genai
         genai.configure(api_key=GEMINI_KEY)
         
-        # Listar modelos disponibles primero
-        try:
-            disponibles = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-            print(f"Modelos disponibles: {disponibles}")
-        except Exception as e:
-            disponibles = []
-            print(f"Error listando: {e}")
-
-        # Probar modelos en orden, con nombres completos models/...
-        modelos_a_probar = []
-        # Si tenemos lista de disponibles, probarlos primero
-        if disponibles:
-            modelos_a_probar.extend(disponibles[:5])
-        # Fallback con nombres comunes
-        modelos_a_probar.extend([
-            "models/gemini-1.5-flash",
-            "models/gemini-1.5-flash-latest",
-            "models/gemini-1.5-flash-8b",
+        # Modelos que TU key si tiene segun tu captura de /api/modelos
+        modelos = [
+            "models/gemini-2.5-flash",
+            "models/gemini-2.5-flash-lite",
+            "models/gemini-flash-latest",
+            "models/gemini-2.5-pro",
             "models/gemini-2.0-flash",
-            "models/gemini-2.0-flash-exp",
-            "models/gemini-pro",
-            "models/gemini-1.5-pro",
-            "gemini-1.5-flash",
-            "gemini-2.0-flash",
-        ])
-
-        for modelo in modelos_a_probar:
+            "models/gemini-2.5-flash-preview-tts",
+        ]
+        
+        for modelo in modelos:
             try:
                 print(f"Probando {modelo}...")
                 model = genai.GenerativeModel(modelo)
                 response = model.generate_content([
-                    "Lee la placa del auto. Placa mexicana Coahuila A-000-AAA. Solo la placa sin guiones. Ejemplo A000AAA. Solo responde la placa.",
+                    "Eres lector de placas mexicanas. Lee la placa del auto en la imagen. Es Coahuila A-000-AAA o F-000-AAA. Responde SOLO con la placa sin guiones, ejemplo: A000AAA o F123ABC. Solo la placa.",
                     {"mime_type": "image/jpeg", "data": image_bytes}
                 ])
                 raw = response.text.strip()
                 placa = limpiar_placa(raw)
                 print(f"✅ {modelo}: {raw} -> {placa}")
                 if placa and len(placa) >= 4:
-                    return PlacaResponse(placa=placa, confianza=0.98, raw_text=raw, modelo_usado=modelo, debug=f"OK con {modelo}")
+                    return PlacaResponse(placa=placa, confianza=0.98, raw_text=raw, modelo_usado=modelo)
             except Exception as e:
-                err = str(e)
-                print(f"❌ {modelo}: {err}")
-                # Si es API no habilitada, dar link directo
-                if "has not been used" in err or "is not enabled" in err or "API_KEY_INVALID" in err:
-                    raise HTTPException(status_code=500, detail=f"API no habilitada para proyecto 102711703969: {err}. Habilita en https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com?project=102711703969")
+                print(f"❌ {modelo}: {e}")
                 continue
 
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error general: {e}")
+        raise HTTPException(500, detail=f"Error Gemini: {e}")
 
-    raise HTTPException(status_code=500, detail=f"Ningun modelo Gemini funciono. Modelos probados: {modelos_a_probar}. Ve a /api/modelos para ver lista. Habilita API en https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com?project=102711703969")
+    raise HTTPException(500, detail="Ningun modelo Gemini pudo leer placa. Intenta con otra foto mas clara.")
