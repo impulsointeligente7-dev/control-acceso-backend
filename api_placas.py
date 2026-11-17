@@ -32,21 +32,26 @@ class PlacaResponse(BaseModel):
     error: Optional[str] = None
     modelo_usado: Optional[str] = None
 
-API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("LLAMA_API_KEY") or ""
+API_KEY = os.getenv("GROQ_API_KEY") or ""
 BASE_URL = "https://api.groq.com/openai/v1"
 
-# SOLO MODELOS 100% GRATIS Y DISPONIBLES PARA CUENTAS FREE DE GROQ
+# GROQ CAMBIO TODO HOY - Llama 3.2 decommissioned, solo quedan Llama 4
+# Probamos TODAS las variantes de nombre posibles
 MODELOS_DISPONIBLES = [
-    "llama-3.2-11b-vision-preview",  # ESTE SI ESTA LIBERADO PARA TODOS - Vision 11B
-    "llama-3.2-90b-vision-preview",  # Vision 90B
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "llama-4-scout-17b-16e-instruct",
+    "llama-4-maverick-17b-128e-instruct",
+    "meta-llama/llama-3.2-11b-vision-preview",
+    "meta-llama/llama-3.2-90b-vision-preview",
 ]
 
 def limpiar_placa(texto: str) -> str:
     if not texto:
         return ""
     t = texto.upper().replace(" ","")
-    # Buscar A-000-AAA especifico
-    m = re.search(r'F?[A-Z]-?0{3}-?[A-Z]{3}|[A-Z]{3}-?[0-9]{3,4}|[A-Z]-[0-9]{3}-[A-Z]{3}', t)
+    # A-000-AAA
+    m = re.search(r'F?[A-Z]-?0{3}-?[A-Z]{3}|[A-Z]{3}-?[0-9]{3,4}', t)
     if m:
         return re.sub(r'[^A-Z0-9]', '', m.group(0))
     return re.sub(r'[^A-Z0-9]', '', t)[:10]
@@ -59,13 +64,14 @@ def root():
         "modelos_probados": MODELOS_DISPONIBLES,
         "base_url": BASE_URL,
         "key_configurada": bool(API_KEY),
-        "key_preview": API_KEY[:10]+"..." if API_KEY else "NO KEY"
+        "key_preview": API_KEY[:10]+"..." if API_KEY else "NO KEY",
+        "nota": "Groq decommissioned Llama 3.2 vision, usar Llama 4"
     }
 
 @app.post("/api/leer-placa", response_model=PlacaResponse)
 def leer_placa(req: ImagenRequest):
     if not API_KEY:
-        raise HTTPException(status_code=500, detail="Falta GROQ_API_KEY en Render Environment Variables")
+        raise HTTPException(status_code=500, detail="Falta GROQ_API_KEY")
 
     errores = []
     for MODEL in MODELOS_DISPONIBLES:
@@ -74,40 +80,30 @@ def leer_placa(req: ImagenRequest):
             client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
             image_url = req.image if req.image.startswith("data:image") else f"data:image/jpeg;base64,{req.image}"
             
-            # Prompt super especifico para placa Coahuila A-000-AAA
             response = client.chat.completions.create(
                 model=MODEL,
                 messages=[
-                    {
-                        "role": "user", 
-                        "content": [
-                            {"type": "text", "text": "Lee la placa del auto. Es una placa de Coahuila que dice A-000-AAA. Extrae SOLO las letras y numeros sin guiones. Ejemplo: A000AAA. Responde SOLO con la placa, nada mas."},
-                            {"type": "image_url", "image_url": {"url": image_url}}
-                        ]
-                    }
+                    {"role": "user", "content": [
+                        {"type": "text", "text": "Lee la placa del auto. Es Coahuila A-000-AAA. Solo la placa sin guiones. Ejemplo: A000AAA. Solo responde la placa."},
+                        {"type": "image_url", "image_url": {"url": image_url}}
+                    ]}
                 ],
                 temperature=0.0,
-                max_tokens=20
+                max_tokens=30
             )
             raw = response.choices[0].message.content.strip()
             placa_limpia = limpiar_placa(raw)
-            
-            print(f"Modelo {MODEL} raw: {raw} -> limpia: {placa_limpia}")
+            print(f"✅ {MODEL} -> {raw} -> {placa_limpia}")
             
             if placa_limpia and len(placa_limpia) >= 5:
-                return PlacaResponse(
-                    placa=placa_limpia, 
-                    confianza=0.95, 
-                    raw_text=f"Modelo {MODEL}: {raw}",
-                    modelo_usado=MODEL
-                )
+                return PlacaResponse(placa=placa_limpia, confianza=0.95, raw_text=f"{MODEL}: {raw}", modelo_usado=MODEL)
             else:
-                errores.append(f"{MODEL}: no detecto placa valida, raw='{raw}'")
+                errores.append(f"{MODEL}: sin placa, raw='{raw}'")
                 
         except Exception as e:
-            err_str = str(e)
-            errores.append(f"{MODEL}: {err_str}")
-            print(f"Error {MODEL}: {err_str}")
+            err = str(e)[:300]
+            errores.append(f"{MODEL}: {err}")
+            print(f"❌ {MODEL}: {err}")
             continue
     
     raise HTTPException(status_code=500, detail=" | ".join(errores))
